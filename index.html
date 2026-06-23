@@ -170,7 +170,7 @@
   </div>
 
   <div class="banner" id="storageBanner">저장 기능을 사용할 수 없는 환경입니다. 입력 내용은 새로고침 시 사라질 수 있으니 <b>JSON 백업</b>으로 보관하세요.</div>
-  <div class="banner live" id="liveBanner">🔄 공유 저장소 연결됨 - 새로고침하면 다른 사람이 추가/수정한 최신 내용을 볼 수 있습니다.</div>
+  <div class="banner live" id="liveBanner">🔄 공유 저장소(개별문서) 연결됨 - 변경 사항이 즉시 안전하게 저장됩니다.</div>
 
   <div class="control">
     <div class="navgroup">
@@ -219,7 +219,7 @@ let orders=[];
 let year=new Date().getFullYear();
 let selectedId=null;
 
-/* ---------- 실시간 공유 (Firebase Firestore) ---------- */
+/* ---------- 실시간 공유 & 용량 무제한 컬렉션 방식 ---------- */
 const FIREBASE_CONFIG={
   apiKey: "AIzaSyBCZYj7P4b8uYKu4zgQoW4rDyIYxmQl440",
   authDomain: "export-calendar-9c873.firebaseapp.com",
@@ -230,13 +230,14 @@ const FIREBASE_CONFIG={
 };
 const ROOM_ID="default"; 
 
-let useFirebase=false, fsDocRef=null, fsUnsub=null;
+let useFirebase=false, fsColRef=null, fsUnsub=null;
 function initFirebase(){
   if(!FIREBASE_CONFIG.apiKey || FIREBASE_CONFIG.apiKey==="YOUR_API_KEY") return false;
   if(typeof firebase==="undefined") return false;
   try{
     firebase.initializeApp(FIREBASE_CONFIG);
-    fsDocRef=firebase.firestore().collection("shipmentCalendars").doc(ROOM_ID);
+    // 용량 제한을 우회하기 위해 '배열 1개'가 아닌 '컬렉션(폴더) 하위의 여러 문서'로 저장합니다.
+    fsColRef=firebase.firestore().collection("shipmentRooms").doc(ROOM_ID).collection("orders");
     return true;
   }catch(e){ console.error("Firebase init 실패:", e); return false; }
 }
@@ -244,33 +245,52 @@ useFirebase=initFirebase();
 
 function subscribeRealtime(){
   if(!useFirebase) return;
-  fsUnsub=fsDocRef.onSnapshot(snap=>{
-    const data=snap.exists?snap.data():null;
-    const incoming=data&&Array.isArray(data.list)?data.list:[];
-    orders=incoming;
+  fsUnsub=fsColRef.onSnapshot(snap=>{
+    orders = snap.docs.map(d => d.data());
     render();
   }, err=>{ console.error("실시간 동기화 오류:", err); });
 }
 
 const hasWS = typeof window!=="undefined" && window.storage && typeof window.storage.get==="function";
 let memOnly=false;
+
 const store={
   async load(){
     if(useFirebase){
-      try{ const snap=await fsDocRef.get(); const data=snap.exists?snap.data():null;
-        return data&&Array.isArray(data.list)?data.list:[]; }catch(e){ return []; }
+      try{ 
+        const snap=await fsColRef.get(); 
+        return snap.docs.map(d => d.data()); 
+      }catch(e){ return []; }
     }
     if(hasWS){ try{ const r=await window.storage.get(KEY); return r&&r.value?JSON.parse(r.value):[]; }catch(e){ return []; } }
     try{ const v=localStorage.getItem(KEY); return v?JSON.parse(v):[]; } catch(e){ memOnly=true; return []; }
   },
-  async save(){
+  
+  // JSON 백업 등 전체 덮어쓰기용
+  async saveBulk(){
     if(useFirebase){
-      try{ await fsDocRef.set({list:orders, updatedAt:Date.now()}); return; }catch(e){ console.error("저장 실패:", e); }
-      return;
+      try {
+        const batch = firebase.firestore().batch();
+        orders.forEach(o => batch.set(fsColRef.doc(o.id), o));
+        await batch.commit();
+        return;
+      } catch(e) { console.error("대량 저장 실패:", e); }
     }
     const data=JSON.stringify(orders);
     if(hasWS){ try{ await window.storage.set(KEY,data); return; }catch(e){} }
     try{ localStorage.setItem(KEY,data); }catch(e){ memOnly=true; }
+  },
+  
+  // 1개의 오더만 수정/추가 (동시성 및 트래픽 최적화)
+  async saveOne(o){
+    if(useFirebase) await fsColRef.doc(o.id).set(o);
+    else await this.saveBulk();
+  },
+  
+  // 1개의 오더만 삭제
+  async delOne(id){
+    if(useFirebase) await fsColRef.doc(id).delete();
+    else await this.saveBulk();
   }
 };
 
@@ -470,7 +490,7 @@ const pane=document.getElementById("calscroll");
 
 grid.addEventListener("pointerdown",e=>{
   if(e.pointerType==="mouse" && e.button!==0) return;
-  if(e.target.closest(".chip-action")) return; // 가위나 수정버튼 클릭시 드래그 무시
+  if(e.target.closest(".chip-action")) return; 
   const chip=e.target.closest(".chip");
   if(!chip) return;
   const kind=chip.classList.contains("dl")?"dl":"ship";
@@ -525,7 +545,7 @@ function cleanupDrag(){
   document.body.style.userSelect="";
   drag=null;
 }
-function onUp(){
+async function onUp(){
   clearTimeout(holdTimer);
   teardownMove();
   if(drag && drag.active){
@@ -539,7 +559,9 @@ function onUp(){
       if(nd!==cur){
         if(kind==="dl") o.docDeadline=nd; else o.shipDate=nd;
         selectedId=o.id; moved=true;
-        cleanupDrag(); store.save(); render();
+        cleanupDrag(); 
+        await store.saveOne(o); // 개별 저장 방식으로 변경
+        render();
         showToast(`${o.company||"오더"} ${kind==="dl"?"서류마감일":"출하일"} → ${fmtKo(nd)}`);
       }
     }
@@ -564,7 +586,6 @@ function selectAndFlash(id, clickedDeadline){
   
   let target = clickedDeadline ? o.shipDate : o.docDeadline;
   
-  // (핵심기능) 클릭한 칩이 출하일인데 자체 서류마감일이 없다면, 부모 오더의 서류마감일을 찾아서 깜빡임!
   if (!clickedDeadline && !target && o.parentId) {
      const parent = orders.find(x => (x.id === o.parentId || x.parentId === o.parentId) && x.docDeadline);
      if (parent && parent.docDeadline) target = parent.docDeadline;
@@ -598,7 +619,6 @@ function closeModal(){ scrim.classList.remove("open"); }
 scrim.addEventListener("click",e=>{ if(e.target===scrim) closeModal(); });
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
 
-// 오더 분할 전용 모달 창
 function splitModal(id){
   const o = orders.find(x=>x.id===id);
   if(!o) return;
@@ -630,24 +650,28 @@ async function saveSplit(id) {
   if(!sDate){ alert("이동할 출하일을 선택하세요."); return; }
   if(sTk<=0 && sTon<=0){ alert("이동할 댓수나 톤수를 입력하세요."); return; }
 
-  // 1. 기존 오더에서 수량 빼기
+  // 1. 기존 오더 업데이트
   o.trucks = Math.max(0, (Number(o.trucks)||0) - sTk);
   o.tonnage = Math.max(0, (Number(o.tonnage)||0) - sTon);
 
-  // 2. 분할된 새로운 오더 복제 생성
+  // 2. 새 오더 복제
   const newO = { ...o };
   newO.id = uid();
   newO.shipDate = sDate;
   newO.trucks = sTk || "";
   newO.tonnage = sTon || "";
-  newO.docDeadline = ""; // 분할된 칩은 서류마감일을 껍데기로 갖지 않음
-  newO.parentId = o.parentId || o.id; // 중요: 부모 오더와 연결하는 보이지 않는 탯줄!
+  newO.docDeadline = ""; 
+  newO.parentId = o.parentId || o.id; 
   
   if(o.memo) newO.memo = o.memo + " (분할됨)";
 
   orders.push(newO);
   selectedId = newO.id;
-  await store.save(); 
+  
+  // 두 문서를 각각 핀포인트로 저장 (동시성 최적화)
+  await store.saveOne(o);
+  await store.saveOne(newO);
+  
   closeModal(); 
   render();
   showToast("오더가 성공적으로 분할되었습니다.");
@@ -698,20 +722,28 @@ async function saveOrder(id){
     port:document.getElementById("f_port").value.trim(), trucks:document.getElementById("f_trucks").value.trim(),
     cfs:document.getElementById("f_cfs").value.trim(), tonnage:document.getElementById("f_tonnage").value.trim(),
     memo:document.getElementById("f_memo").value.trim(),
-    parentId: o.parentId || null // 기존 부모 ID가 있으면 유지
+    parentId: o.parentId || null 
   };
     
   if(id){ const i=orders.findIndex(x=>x.id===id); if(i>-1) orders[i]=rec; } else orders.push(rec);
   selectedId=rec.id;
   if(+ship.slice(0,4)!==year) year=+ship.slice(0,4);
-  await store.save(); closeModal(); render();
+  
+  // 1개의 오더만 개별 저장
+  await store.saveOne(rec); 
+  closeModal(); 
+  render();
 }
 
 async function delOrder(id){
   if(!confirm("이 오더를 삭제할까요?")) return;
   orders=orders.filter(o=>o.id!==id);
   if(selectedId===id) selectedId=null;
-  await store.save(); closeModal(); render();
+  
+  // 1개의 오더만 개별 삭제
+  await store.delOne(id); 
+  closeModal(); 
+  render();
 }
 
 /* ---------- nav ---------- */
@@ -742,7 +774,7 @@ document.getElementById("fileImport").onchange=e=>{
       if(orders.length && !confirm(`기존 ${orders.length}건을 불러온 ${data.length}건으로 교체할까요? (취소 시 병합)`)){
         const ids=new Set(orders.map(o=>o.id)); data.forEach(o=>{ if(!o.id||ids.has(o.id)) o.id=uid(); orders.push(o); });
       } else { orders=data.map(o=>Object.assign({id:o.id||uid()},o)); }
-      await store.save(); render(); alert("불러오기 완료");
+      await store.saveBulk(); render(); alert("불러오기 완료");
     }catch(err){ alert("올바른 JSON 백업 파일이 아닙니다."); }
     e.target.value="";
   };
@@ -756,8 +788,8 @@ document.getElementById("fileImport").onchange=e=>{
   if(!hasWS && !useFirebase){ try{ localStorage.setItem("__t","1"); localStorage.removeItem("__t"); }catch(e){ lsBlocked=true; } }
   if(!useFirebase && (memOnly || lsBlocked)) document.getElementById("storageBanner").style.display="block";
   if(useFirebase) document.getElementById("liveBanner").style.display="block";
-  // 실시간 자동 반영
-  // if(useFirebase) subscribeRealtime();
+  // 실시간 자동 반영 켬
+  if(useFirebase) subscribeRealtime();
   render();
   if(document.fonts && document.fonts.ready) document.fonts.ready.then(refit);
   setTimeout(scrollToToday,80);
