@@ -104,10 +104,13 @@
   .chip.sm{font-size:9px}
   .chip.wrapline{align-items:flex-start}
   .chip.wrapline .chip-txt{white-space:normal; overflow-wrap:anywhere; word-break:break-word}
-  .chip-edit{flex:0 0 auto; border:0; background:transparent; padding:0 1px; margin:0; font-size:12px;
+  
+  /* 아이콘 버튼 공통 */
+  .chip-action {flex:0 0 auto; border:0; background:transparent; padding:0 2px; margin:0; font-size:12px;
     line-height:1; color:inherit; opacity:0; cursor:pointer; border-radius:4px}
-  .chip:hover .chip-edit{opacity:.65}
-  .chip-edit:hover{opacity:1; background:rgba(0,0,0,.08)}
+  .chip:hover .chip-action {opacity:.65}
+  .chip-action:hover {opacity:1; background:rgba(0,0,0,.08)}
+  
   .chip.ship{background:var(--ship-soft); border-color:var(--ship); color:var(--ship-ink); touch-action:none; cursor:grab}
   .chip.ship:active{cursor:grabbing}
   .chip.dl{background:var(--deadline-soft); border-color:var(--deadline); color:var(--deadline-ink); touch-action:none; cursor:grab}
@@ -356,7 +359,6 @@ function updateStats() {
   
   orders.forEach(o=>{ 
     if(o.shipDate && +o.shipDate.slice(0,4)===year){ 
-      // 'all' 이거나 선택한 월(01, 02...)이 오더의 출하월과 일치할 경우만 통계 합산
       if(selectedMonth === "all" || o.shipDate.slice(5,7) === selectedMonth) {
         yc++; 
         yt+=Number(o.trucks)||0; 
@@ -370,7 +372,6 @@ function updateStats() {
   document.getElementById("statTonnage").textContent=Number(yton.toFixed(2));
 }
 
-// 월 선택창 변경 시 즉시 통계 업데이트
 document.getElementById("statMonth").addEventListener("change", updateStats);
 
 function render(){
@@ -426,13 +427,16 @@ function render(){
       const tonStr = dayTonnage > 0 ? ` · ${Number(dayTonnage.toFixed(2))}톤` : "";
       inner+=`<div class="seclabel sl-ship">출하 ${ships.length} · ${dayTrucks}대${tonStr}</div><div class="sec">`;
       ships.forEach(o=>{ const line=lineOf(o);
-        inner+=`<div class="chip ship" data-id="${o.id}" title="${esc(line)}"><span class="chip-txt">${esc(line)}</span><button class="chip-edit" data-id="${o.id}" title="수정" aria-label="수정">✎</button></div>`; });
+        inner+=`<div class="chip ship" data-id="${o.id}" title="${esc(line)}"><span class="chip-txt">${esc(line)}</span>
+          <button class="chip-action chip-split" data-id="${o.id}" title="이 오더 분할하기" aria-label="분할">✂️</button>
+          <button class="chip-action chip-edit" data-id="${o.id}" title="수정" aria-label="수정">✎</button></div>`; });
       inner+=`</div>`;
     }
     if(dls.length){
       inner+=`<div class="seclabel sl-dl ${ships.length?"divided":""}">서류마감 ${dls.length}</div><div class="sec">`;
       dls.forEach(o=>{ const line=lineOf(o);
-        inner+=`<div class="chip dl" data-id="${o.id}" title="서류마감 · ${esc(line)}"><span class="chip-txt">${esc(line)}</span><button class="chip-edit" data-id="${o.id}" title="수정" aria-label="수정">✎</button></div>`; });
+        inner+=`<div class="chip dl" data-id="${o.id}" title="서류마감 · ${esc(line)}"><span class="chip-txt">${esc(line)}</span>
+          <button class="chip-action chip-edit" data-id="${o.id}" title="수정" aria-label="수정">✎</button></div>`; });
       inner+=`</div>`;
     }
     html+=`<div class="${cls}" data-date="${k}">${inner}</div>`;
@@ -440,7 +444,7 @@ function render(){
   }
   cal.innerHTML=html;
 
-  updateStats(); // 렌더링 후 통계 계산 실행
+  updateStats();
   refit();
 }
 
@@ -466,7 +470,7 @@ const pane=document.getElementById("calscroll");
 
 grid.addEventListener("pointerdown",e=>{
   if(e.pointerType==="mouse" && e.button!==0) return;
-  if(e.target.closest(".chip-edit")) return;
+  if(e.target.closest(".chip-action")) return; // 가위나 수정버튼 클릭시 드래그 무시
   const chip=e.target.closest(".chip");
   if(!chip) return;
   const kind=chip.classList.contains("dl")?"dl":"ship";
@@ -544,7 +548,7 @@ function onUp(){
   } else { drag=null; }
 }
 
-/* ---------- click: edit / flash / add ---------- */
+/* ---------- click: edit / split / flash / add ---------- */
 function flashCell(dk){
   const cell=[...document.querySelectorAll(".cell")].find(c=>c.dataset.date===dk);
   if(!cell) return false;
@@ -553,10 +557,19 @@ function flashCell(dk){
   setTimeout(()=>cell.classList.remove("flash"),2600);
   return true;
 }
+
 function selectAndFlash(id, clickedDeadline){
   const o=orders.find(x=>x.id===id); if(!o) return;
   selectedId=id; render();
-  const target = clickedDeadline ? o.shipDate : o.docDeadline;
+  
+  let target = clickedDeadline ? o.shipDate : o.docDeadline;
+  
+  // (핵심기능) 클릭한 칩이 출하일인데 자체 서류마감일이 없다면, 부모 오더의 서류마감일을 찾아서 깜빡임!
+  if (!clickedDeadline && !target && o.parentId) {
+     const parent = orders.find(x => (x.id === o.parentId || x.parentId === o.parentId) && x.docDeadline);
+     if (parent && parent.docDeadline) target = parent.docDeadline;
+  }
+
   const label = clickedDeadline ? "출하일" : "서류마감일";
   if(!target){ showToast(`${o.company||"오더"} · ${label} 미입력`); return; }
   if(+target.slice(0,4)===year) flashCell(target);
@@ -564,8 +577,12 @@ function selectAndFlash(id, clickedDeadline){
 }
 
 grid.addEventListener("click",e=>{
+  const splitBtn=e.target.closest(".chip-split");
+  if(splitBtn){ splitModal(splitBtn.dataset.id); return; }
+  
   const editBtn=e.target.closest(".chip-edit");
   if(editBtn){ const o=orders.find(x=>x.id===editBtn.dataset.id); if(o) formModal(o); return; }
+  
   if(justDragged) return;
   const chip=e.target.closest(".chip");
   if(chip){ selectAndFlash(chip.dataset.id, chip.classList.contains("dl")); return; }
@@ -580,6 +597,61 @@ function openModal(html){ modal.innerHTML=html; scrim.classList.add("open"); }
 function closeModal(){ scrim.classList.remove("open"); }
 scrim.addEventListener("click",e=>{ if(e.target===scrim) closeModal(); });
 document.addEventListener("keydown",e=>{ if(e.key==="Escape") closeModal(); });
+
+// 오더 분할 전용 모달 창
+function splitModal(id){
+  const o = orders.find(x=>x.id===id);
+  if(!o) return;
+  openModal(`
+    <div class="mhead"><h2>✂️ 오더 분할하기</h2><button class="x" onclick="closeModal()">×</button></div>
+    <div class="mbody">
+      <div class="banner live" style="display:block; margin-bottom:16px;">
+        원본 오더에서 입력한 수량만큼 차감하고, 새로운 날짜에 분할된 오더를 생성합니다. 서류마감일은 자동으로 원본과 연동됩니다.
+      </div>
+      <div class="field"><label class="req">이동할 출하일</label><input type="date" id="s_ship"></div>
+      <div class="row2">
+        <div class="field"><label>이동할 차량 댓수 (현재 ${o.trucks||0}대)</label><input type="number" min="0" max="${o.trucks||0}" id="s_trucks" placeholder="예: 2"></div>
+        <div class="field"><label>이동할 톤수 (현재 ${o.tonnage||0}톤)</label><input type="number" min="0" step="any" max="${o.tonnage||0}" id="s_tonnage" placeholder="예: 12.5"></div>
+      </div>
+    </div>
+    <div class="mfoot">
+      <span></span>
+      <div class="right"><button class="ghost" onclick="closeModal()">취소</button>
+        <button class="primary" onclick="saveSplit('${id}')">분할 저장</button></div>
+    </div>`);
+}
+
+async function saveSplit(id) {
+  const o = orders.find(x=>x.id===id);
+  const sDate = document.getElementById("s_ship").value;
+  const sTk = Number(document.getElementById("s_trucks").value)||0;
+  const sTon = Number(document.getElementById("s_tonnage").value)||0;
+
+  if(!sDate){ alert("이동할 출하일을 선택하세요."); return; }
+  if(sTk<=0 && sTon<=0){ alert("이동할 댓수나 톤수를 입력하세요."); return; }
+
+  // 1. 기존 오더에서 수량 빼기
+  o.trucks = Math.max(0, (Number(o.trucks)||0) - sTk);
+  o.tonnage = Math.max(0, (Number(o.tonnage)||0) - sTon);
+
+  // 2. 분할된 새로운 오더 복제 생성
+  const newO = { ...o };
+  newO.id = uid();
+  newO.shipDate = sDate;
+  newO.trucks = sTk || "";
+  newO.tonnage = sTon || "";
+  newO.docDeadline = ""; // 분할된 칩은 서류마감일을 껍데기로 갖지 않음
+  newO.parentId = o.parentId || o.id; // 중요: 부모 오더와 연결하는 보이지 않는 탯줄!
+  
+  if(o.memo) newO.memo = o.memo + " (분할됨)";
+
+  orders.push(newO);
+  selectedId = newO.id;
+  await store.save(); 
+  closeModal(); 
+  render();
+  showToast("오더가 성공적으로 분할되었습니다.");
+}
 
 function formModal(o, presetDate){
   const isEdit=!!o; o=o||{};
@@ -619,16 +691,22 @@ async function saveOrder(id){
   const ship=document.getElementById("f_ship").value;
   if(!ship){ alert("출하일을 선택하세요."); return; }
   if(!co){ alert("상사명을 입력하세요."); return; }
+  
+  const o=orders.find(x=>x.id===id)||{};
   const rec={ id:id||uid(), shipDate:ship, docDeadline:document.getElementById("f_dl").value||"", company:co,
     poNo:document.getElementById("f_po").value.trim(), carrier:document.getElementById("f_carrier").value.trim(),
     port:document.getElementById("f_port").value.trim(), trucks:document.getElementById("f_trucks").value.trim(),
     cfs:document.getElementById("f_cfs").value.trim(), tonnage:document.getElementById("f_tonnage").value.trim(),
-    memo:document.getElementById("f_memo").value.trim() };
-  if(id){ const i=orders.findIndex(o=>o.id===id); if(i>-1) orders[i]=rec; } else orders.push(rec);
+    memo:document.getElementById("f_memo").value.trim(),
+    parentId: o.parentId || null // 기존 부모 ID가 있으면 유지
+  };
+    
+  if(id){ const i=orders.findIndex(x=>x.id===id); if(i>-1) orders[i]=rec; } else orders.push(rec);
   selectedId=rec.id;
   if(+ship.slice(0,4)!==year) year=+ship.slice(0,4);
   await store.save(); closeModal(); render();
 }
+
 async function delOrder(id){
   if(!confirm("이 오더를 삭제할까요?")) return;
   orders=orders.filter(o=>o.id!==id);
